@@ -126,17 +126,6 @@
         (setEphemeral false)
         queue)))
 
-(defslash test2
-  "test auto command registration"
-  {:opt {:type OptionType/STRING
-         :description "did this register?"
-         :required true}}
-  [event]
-  (.. event
-      (reply "It's worrrrking!!!!")
-      (setEphemeral true)
-      queue))
-
 (defmacro message-listener [args & body]
   (apply listener-adapter 'onMessageReceived args body))
 
@@ -195,8 +184,12 @@
   (.. jda
       getRegisteredListeners)
 
-  (.. (first global-commands)
-      getName)
+  (->> global-commands
+      (filter #(= "test2" (.getName %)))
+      first
+      .getId
+      (.deleteCommandById jda)
+      .queue)
 
   (.. jda
       (upsertCommand |roll-data)
