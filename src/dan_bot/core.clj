@@ -78,27 +78,25 @@
      (onSlashCommandInteraction ~args
        ~@body)))
 
-(def slash-registry (atom #{}))
-
 (defmacro defslash [name description options args & body]
   (let [[event] args
         handler-name (symbol (str (str name) "-handler"))
-        name-key (keyword name)
+        name-key (gensym name)
         data-sym (gensym "data")]
-    `(list (defn ~handler-name ~args ~@body)
-           (when-not (@slash-registry ~name-key)
-             (def ~name (slash-command-listener
-                         ~args
-                         (when (= ~(str name) (.getName ~event))
-                           (log-event ~event)
-                           (~handler-name ~event))))
-             (swap! slash-registry #(conj % ~name-key))
-             (.addEventListener jda (object-array [~name])))
-           (when-not (global-command-defined? ~(str name))
-             (let [~data-sym (slash-command-data ~(str name) ~description ~options)]
-               (.. jda
-                   (upsertCommand ~data-sym)
-                   queue))))))
+    `(do (defn ~handler-name ~args ~@body)
+         (defonce ~name
+           (let [~name-key (slash-command-listener
+                            ~args
+                            (when (= ~(str name) (.getName ~event))
+                              (log-event ~event)
+                              (~handler-name ~event)))]
+             (.addEventListener jda (object-array [~name-key]))
+             ~name-key))
+         (when-not (global-command-defined? ~(str name))
+           (let [~data-sym (slash-command-data ~(str name) ~description ~options)]
+             (.. jda
+                 (upsertCommand ~data-sym)
+                 queue))))))
 
 (defslash test
   "test slash command for dan-bot"
@@ -146,10 +144,10 @@
                     getMessage)
         text (.getContentDisplay message)]
     (when (re-find #"(?i)who.*friend.*night\?" text)
-          (.. message
-              getChannel
-              (sendMessage "I'm always ready for friend's night, it's the best!!!")
-              queue))))
+      (.. message
+          getChannel
+          (sendMessage "I'm always ready for friend's night, it's the best!!!")
+          queue))))
 
 (defmessage praise-the-orb [event]
   (let [message (.getMessage event)
@@ -185,11 +183,11 @@
       getRegisteredListeners)
 
   (->> global-commands
-      (filter #(= "test2" (.getName %)))
-      first
-      .getId
-      (.deleteCommandById jda)
-      .queue)
+       (filter #(= "test2" (.getName %)))
+       first
+       .getId
+       (.deleteCommandById jda)
+       .queue)
 
   (.. jda
       (upsertCommand |roll-data)
