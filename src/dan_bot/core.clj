@@ -139,37 +139,50 @@
              (.addEventListener jda (object-array [~name-key]))
              ~name-key)))))
 
-(defmessage friends-night [event]
-  (let [message (.. event
-                    getMessage)
+(defmessage react-ukraine-flag [event]
+  (let [message (.getMessage event)
         text (.getContentDisplay message)]
-    (when (re-find #"(?i)who.*friend.*night\?" text)
+    (when (re-find #"(?i)ukraine" text)
       (.. message
-          getChannel
-          (sendMessage "I'm always ready for friend's night, it's the best!!!")
+          (addReaction "🇺🇦")
           queue))))
 
-(defmessage praise-the-orb [event]
-  (let [message (.getMessage event)
-        text (.getContentDisplay message)
-        praises ["Praise the orb!"
-                 "All hail the orb!"
-                 "All shall kneel before the orb!"
-                 "Sing praises to the orb! I\u00e4! Shub-Niggurath!"
-                 "The shining orb circumscribes our existence!"
-                 "There is no truth but the orb!"
-                 "The orb's beauty passes understanding!"
-                 "Those who reject the orb must perish!"
-                 "The faithful will find rest within the the orb's spherical embrace!"
-                 "The orb laughs at those who would oppose it!"
-                 "The orb shines down upon the faithful!"
-                 "The faithful bask in the light of the orb!"
-                 "Those who would defile the orb shall be mist!"]]
-    (when (re-find #"(?i) orb([ !.,?;]|$)" text)
-      (.. message
-          getChannel
-          (sendMessage (rand-nth praises))
-          queue))))
+(defmacro def-random-response-listener [name regex responses]
+  (let [event (gensym "event")
+        message (gensym "message")
+        text (gensym "text")]
+    `(defmessage ~name [~event]
+       (let [~message (.getMessage ~event)
+             ~text (.getContentDisplay ~message)]
+          (when (re-find ~regex ~text)
+            (.. ~message
+                getChannel
+                (sendMessage (rand-nth ~responses))
+                queue))))))
+
+(def-random-response-listener friends-night
+  #"(?i)who.*friend.*night\?"
+  ["I'm always ready for friend's night, it's the best!!!"
+   "Only losers skip friend's night!"
+   "I've been waiting for friend's night all week!"
+   "Friends don't let friends skip friend's night!"
+   "Be there or be square!"])
+
+(def-random-response-listener praise-the-orb
+  #"(?i) orb([ !.,?;]|$)"
+  ["Praise the orb!"
+   "All hail the orb!"
+   "All shall kneel before the orb!"
+   "Sing praises to the orb! I\u00e4! Shub-Niggurath!"
+   "The shining orb circumscribes our existence!"
+   "There is no truth but the orb!"
+   "The orb's beauty passes understanding!"
+   "Those who reject the orb must perish!"
+   "The faithful will find rest within the the orb's spherical embrace!"
+   "The orb laughs at those who would oppose it!"
+   "The orb shines down upon the faithful!"
+   "The faithful bask in the light of the orb!"
+   "Those who would defile the orb shall be mist!"])
 
 (comment
   (.. jda
@@ -179,8 +192,10 @@
                            retrieveCommands
                            complete))
 
-  (.. jda
-      getRegisteredListeners)
+  (first global-commands)
+
+  (count (.. jda
+         getRegisteredListeners))
 
   (->> global-commands
        (filter #(= "test2" (.getName %)))
