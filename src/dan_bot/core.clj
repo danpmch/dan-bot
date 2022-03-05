@@ -161,7 +161,7 @@
                 queue))))))
 
 (def-random-response-listener friends-night
-  #"(?i)who.*friend.*night\?"
+  #"(?i)who.*friend.*night.*\?"
   ["I'm always ready for friend's night, it's the best!!!"
    "Only losers skip friend's night!"
    "I've been waiting for friend's night all week!"
