@@ -6,10 +6,25 @@
            net.dv8tion.jda.api.requests.GatewayIntent)
   (:gen-class))
 
-(def token
+(def config
   (-> (slurp "./config.edn")
-      clojure.edn/read-string
-      :token))
+      clojure.edn/read-string))
+
+(def token
+  (:token config))
+
+(def friend-ids
+  (:friends config))
+
+(defn friend-set [id-list]
+  (set (mapv #(% friend-ids) id-list)))
+
+(defn roll-insultable? [friend-id]
+  (let [friend-ids (:die-rolls-to-insult config)]
+    ((friend-set friend-ids) friend-id)))
+
+(defn mention-friend [friend-id]
+  (str "<@!" friend-id ">"))
 
 ;(map #(.getName %) (.getMethods ListenerAdapter))
 ;(map #(.getName %) (.getMethods SlashCommandEvent))
@@ -29,12 +44,17 @@
     {:sides sides
      :values (mapv roll-n (repeat total-dice sides))}))
 
-(defn render-rolls [rolls]
+(defn render-rolls [author rolls]
   (letfn [(render [result]
-            (str "d" (:sides result) ": " (:values result)
-                 (if (< (count (:values result)) 2)
-                   ""
-                   (str "   total: " (apply + (:values result))))))]
+            (clojure.string/join "\n" [(str "d" (:sides result) ": " (:values result)
+                                            (if (< (count (:values result)) 2)
+                                              ""
+                                              (str "   total: " (apply + (:values result)))))
+                                       (if-let [friend (and (= (:sides result) 100)
+                                                            (some #(<= 90 %) (:values result))
+                                                            (roll-insultable? (.getId author)))]
+                                         (str "Goddammit " (mention-friend friend) ".")
+                                         nil)]))]
     (let [rolls-text (->> rolls
                           (map render)
                           (clojure.string/join "\n"))
@@ -120,9 +140,44 @@
         results (mapv roll-dice
                       (clojure.string/split dice-str #" "))]
     (.. event
-        (reply (render-rolls results))
+        (reply (render-rolls (.getUser event) results))
         (setEphemeral false)
         queue)))
+
+(defslash poll-by-reactions
+  "Create a simple poll using reactions"
+  {:title {:type OptionType/STRING
+           :description "Describe what you're polling"
+           :required true}
+   :choices {:type OptionType/STRING
+             :description "Semicolon separated list of choices"
+             :required true}}
+  [event]
+  (let [title (->> (.getOptions event)
+                   (filter #(= "title" (.getName %)))
+                   first)
+        choices-str (->> (.getOptions event)
+                         (filter #(= "choices" (.getName %)))
+                         first
+                         (.getAsString))
+        emojis ["1️⃣" "2️⃣" "3️⃣" "4️⃣" "5⃣" "6️⃣" "7️⃣" "8️⃣" "9️⃣" "🔟"]
+        choices (clojure.string/split choices-str #";")
+        display-choices (mapv (fn [emoji choice]
+                                (str emoji ": " choice))
+                              emojis
+                              choices)
+        text (clojure.string/join "\n" (flatten [(str "**" (.getAsString title) "**")
+                                                 display-choices
+                                                 "Vote by reacting to this message:"]))
+        message (.. event
+                    (reply text)
+                    #_(setEphemeral true)
+                    complete
+                    retrieveOriginal
+                    complete)]
+    (->> (mapv #(.addReaction message %)
+               (take (count choices) emojis))
+         (mapv #(.queue %)))))
 
 (defmacro message-listener [args & body]
   (apply listener-adapter 'onMessageReceived args body))
@@ -154,19 +209,21 @@
     `(defmessage ~name [~event]
        (let [~message (.getMessage ~event)
              ~text (.getContentDisplay ~message)]
-          (when (re-find ~regex ~text)
-            (.. ~message
-                getChannel
-                (sendMessage (rand-nth ~responses))
-                queue))))))
+         (when (re-find ~regex ~text)
+           (.. ~message
+               getChannel
+               (sendMessage (rand-nth ~responses))
+               queue))))))
 
 (def-random-response-listener friends-night
   #"(?i)who.*friend.*night.*\?"
-  ["I'm always ready for friend's night, it's the best!!!"
-   "Only losers skip friend's night!"
-   "I've been waiting for friend's night all week!"
-   "Friends don't let friends skip friend's night!"
-   "Be there or be square!"])
+  (concat ["I'm always ready for friend's night, it's the best!!!"
+           "Only losers skip friend's night!"
+           "I've been waiting for friend's night all week!"
+           "Friends don't let friends skip friend's night!"
+           "Be there or be square!"]
+          (mapv #(str (mention-friend %) " is a butt-face!")
+                (friend-set (:friends-to-insult config)))))
 
 (def-random-response-listener praise-the-orb
   #"(?i) orb([ !.,?;]|$)"
@@ -195,7 +252,7 @@
   (first global-commands)
 
   (count (.. jda
-         getRegisteredListeners))
+             getRegisteredListeners))
 
   (->> global-commands
        (filter #(= "test2" (.getName %)))
