@@ -1,5 +1,7 @@
 (ns dan-bot.core
-  (:import net.dv8tion.jda.api.JDABuilder
+  (:import java.time.ZonedDateTime
+           java.time.temporal.ChronoUnit
+           net.dv8tion.jda.api.JDABuilder
            net.dv8tion.jda.api.hooks.ListenerAdapter
            net.dv8tion.jda.api.interactions.commands.build.Commands
            net.dv8tion.jda.api.interactions.commands.OptionType
@@ -66,17 +68,29 @@
 
 (defn slash-command-data [command-name description options]
   (let [data (Commands/slash command-name description)]
-    (when (not (empty? options))
+    (if-not (empty? options)
       (reduce (fn [d [opt-name values]]
                 (if-let [required (:required values)]
                   (.addOption d (:type values) (name opt-name) (:description values) required)
                   (.addOption d (:type values) (name opt-name) (:description values))))
               data
-              options))))
+              options)
+      data)))
 
 (def jda (.. (JDABuilder/createLight token [GatewayIntent/GUILD_MESSAGES
                                             GatewayIntent/DIRECT_MESSAGES])
              build))
+
+(def alert-channel (.. jda
+                       (retrieveUserById (:me friend-ids))
+                       complete
+                       openPrivateChannel
+                       complete))
+
+(defn alert [& msg]
+  (.. alert-channel
+      (sendMessage (clojure.string/join " " msg))
+      queue))
 
 (defn global-command-defined? [name]
   (let [commands (.. jda
@@ -179,6 +193,48 @@
                (take (count choices) emojis))
          (mapv #(.queue %)))))
 
+(defn get-guild-ids [guilds]
+  (let [all-guilds (:guilds config)]
+    (set (mapv #(% all-guilds) guilds))))
+
+(defn in-guilds? [guilds event]
+  (let [guild-ids (get-guild-ids guilds)
+        guild-id (.. event
+                     getGuild
+                     getId)]
+    (contains? guild-ids guild-id)))
+
+(def last-incident (atom nil))
+
+(defslash record-incident
+  "Record the date of the current incident"
+  {}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (do (swap! last-incident (fn [_] (ZonedDateTime/now)))
+        (.. event
+            (reply "Incident time set.")
+            (setEphemeral true)
+            queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
+(defslash time-since-last-incident
+  "Report the time elapsed since the last incident"
+  {}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [elapsed-days (.between ChronoUnit/DAYS @last-incident (ZonedDateTime/now))]
+      (.. event
+          (reply (format (:incident-text config) elapsed-days))
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
 (defmacro message-listener [args & body]
   (apply listener-adapter 'onMessageReceived args body))
 
@@ -194,13 +250,25 @@
              (.addEventListener jda (object-array [~name-key]))
              ~name-key)))))
 
-(defmessage react-ukraine-flag [event]
-  (let [message (.getMessage event)
+(defmessage react-ukraine-flag [_]
+  #_(let [message (.getMessage event)
         text (.getContentDisplay message)]
     (when (re-find #"(?i)ukraine" text)
       (.. message
           (addReaction "🇺🇦")
           queue))))
+
+; <a:ultrafastparrot:658317840868442113>
+(defmessage calm-down [event]
+  (let [message (.getMessage event)
+        text (.getContentRaw message)
+        user-id (.. (.getAuthor event)
+                   getId)
+        friend-to-calm (:friend-to-calm-down config)
+        friend-to-calm-id (get friend-ids friend-to-calm)]
+    (when (and (re-find #"<a:ultrafastparrot:658317840868442113>" text)
+               #_(= user-id friend-to-calm-id))
+      (alert "Detected uncalmness:" text))))
 
 (defmacro def-random-response-listener [name regex responses]
   (let [event (gensym "event")
@@ -249,7 +317,8 @@
                            retrieveCommands
                            complete))
 
-  (first global-commands)
+  (->> global-commands
+       (mapv #(.getName %)))
 
   (count (.. jda
              getRegisteredListeners))
