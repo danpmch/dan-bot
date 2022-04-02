@@ -1,12 +1,18 @@
 (ns dan-bot.core
-  (:import java.time.ZonedDateTime
+  (:import (java.time ZonedDateTime
+                      ZoneId)
+           java.time.format.DateTimeFormatter
            java.time.temporal.ChronoUnit
            net.dv8tion.jda.api.JDABuilder
            net.dv8tion.jda.api.hooks.ListenerAdapter
            net.dv8tion.jda.api.interactions.commands.build.Commands
            net.dv8tion.jda.api.interactions.commands.OptionType
            net.dv8tion.jda.api.requests.GatewayIntent)
+  (:require [next.jdbc :as jdbc])
   (:gen-class))
+
+(def db {:dbtype "sqlite" :dbname "bot"})
+(def ds (jdbc/get-datasource db))
 
 (def config
   (-> (slurp "./config.edn")
@@ -206,29 +212,120 @@
 
 (def last-incident (atom nil))
 
-(defslash record-incident
-  "Record the date of the current incident"
+(defslash list-incident-types
+  "List the currently defined incident types"
   {}
   [event]
   (if (in-guilds? (:incident-guilds config) event)
-    (do (swap! last-incident (fn [_] (ZonedDateTime/now)))
-        (.. event
-            (reply "Incident time set.")
-            (setEphemeral true)
-            queue))
+    (let [incident-types (jdbc/execute! ds ["select name, description from incident_types order by name"])
+          display-rows (mapv (fn [r]
+                               (let [n (:incident_types/name r)
+                                     d (:incident_types/description r)]
+                                 (str n ": " d)))
+                             incident-types)]
+      (.. event
+          (reply (clojure.string/join "\n" display-rows))
+          (setEphemeral true)
+          queue))
     (.. event
         (reply "This slash command is not supported for your guild.")
         (setEphemeral true)
         queue)))
 
-(defslash time-since-last-incident
-  "Report the time elapsed since the last incident"
-  {}
+(defslash define-incident-type
+  "Define a new type of incident"
+  {:type {:type OptionType/STRING
+          :description "The name that identifies this type of incident"
+          :required true}
+   :description {:type OptionType/STRING
+                 :description "An explanation of what this incident type represents"
+                 :required true}
+   :template {:type OptionType/STRING
+              :description "A printf style template for printing the most recent incident"
+              :required true}}
   [event]
   (if (in-guilds? (:incident-guilds config) event)
-    (let [elapsed-days (.between ChronoUnit/DAYS @last-incident (ZonedDateTime/now))]
+    (let [n (->> (.getOptions event)
+                 (filter #(= "type" (.getName %)))
+                 first
+                 (.getAsString))
+          d (->> (.getOptions event)
+                 (filter #(= "description" (.getName %)))
+                 first
+                 (.getAsString))
+          t (->> (.getOptions event)
+                 (filter #(= "template" (.getName %)))
+                 first
+                 (.getAsString))]
+      (jdbc/execute! ds [(str "insert into incident_types (name, description, status_template) values ("
+                              (->> (mapv #(str "'" % "'") [n d t])
+                                   (clojure.string/join ", "))
+                              ")")])
       (.. event
-          (reply (format (:incident-text config) elapsed-days))
+          (reply "New incident type stored.")
+          (setEphemeral true)
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
+(defslash record-incident
+  "Record the date of the current incident"
+  {:type {:type OptionType/STRING
+          :description "The type of incident (use the same type name each time)"
+          :required true}}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [n (->> (.getOptions event)
+                 (filter #(= "type" (.getName %)))
+                 first
+                 (.getAsString))]
+      (jdbc/execute! ds [(str "insert into incidents (name) values ('" n "')")])
+      (.. event
+          (reply "Incident time set.")
+          (setEphemeral true)
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
+(defn to-java-datetime [sql-datetime]
+  (ZonedDateTime/parse sql-datetime
+                       (.. (DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss")
+                           (withZone (ZoneId/of "UTC")))))
+
+(defn latest-incident [incident-name]
+  (str "
+select status_template, t
+ from incident_types join incidents on incident_types.name = incidents.name
+ where incident_types.name = '" incident-name "'
+ order by t desc
+ limit 1
+"))
+
+(defslash time-since-last-incident
+  "Report the time elapsed since the last incident"
+  {:type {:type OptionType/STRING
+          :description "The type of incident (use the same type name each time)"
+          :required false}}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [incident-type (or (->> (.getOptions event)
+                                 (filter #(= "type" (.getName %)))
+                                 first
+                                 (.getAsString))
+                            (:default-incident config))
+          lookup-result (->> (jdbc/execute! ds [(latest-incident incident-type)])
+                             first)
+          last-incident (->> lookup-result
+                             :incidents/t
+                             to-java-datetime)
+          template (:incident_types/status_template lookup-result)
+          elapsed-days (.between ChronoUnit/DAYS last-incident (ZonedDateTime/now))]
+      (.. event
+          (reply (format template elapsed-days))
           queue))
     (.. event
         (reply "This slash command is not supported for your guild.")
@@ -252,18 +349,18 @@
 
 (defmessage react-ukraine-flag [_]
   #_(let [message (.getMessage event)
-        text (.getContentDisplay message)]
-    (when (re-find #"(?i)ukraine" text)
-      (.. message
-          (addReaction "🇺🇦")
-          queue))))
+          text (.getContentDisplay message)]
+      (when (re-find #"(?i)ukraine" text)
+        (.. message
+            (addReaction "🇺🇦")
+            queue))))
 
 ; <a:ultrafastparrot:658317840868442113>
 (defmessage calm-down [event]
   (let [message (.getMessage event)
         text (.getContentRaw message)
         user-id (.. (.getAuthor event)
-                   getId)
+                    getId)
         friend-to-calm (:friend-to-calm-down config)
         friend-to-calm-id (get friend-ids friend-to-calm)]
     (when (and (re-find #"<a:ultrafastparrot:658317840868442113>" text)
@@ -324,7 +421,7 @@
              getRegisteredListeners))
 
   (->> global-commands
-       (filter #(= "test2" (.getName %)))
+       (filter #(= "time-since-last-incident" (.getName %)))
        first
        .getId
        (.deleteCommandById jda)
@@ -332,5 +429,21 @@
 
   (.. jda
       (upsertCommand |roll-data)
-      queue))
+      queue)
+
+  (jdbc/execute! ds ["
+create table incident_types (
+  name varchar primary key,
+  description varchar,
+  status_template varchar
+)
+"])
+  (jdbc/execute! ds ["
+create table incidents (
+  name varchar,
+  t datetime default current_timestamp,
+  primary key (name, t),
+  foreign key (name) references incident_types (name)
+    on delete cascade
+)"]))
 
