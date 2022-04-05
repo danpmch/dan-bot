@@ -44,20 +44,24 @@
       (inc r))))
 
 (defn roll-dice [dice-description]
-  (let [[_ n-str sides-str] (re-matches #"([0-9]*)d([0-9]+)" dice-description)
+  (let [[_ n-str sides-str mod-str] (re-matches #"([0-9]*)d([0-9]+)([+-][0-9]+)?" dice-description)
         total-dice (if (empty? n-str)
                      1
                      (Integer/parseInt n-str))
-        sides (Integer/parseInt sides-str)]
+        sides (Integer/parseInt sides-str)
+        mod (if mod-str
+              (Integer/parseInt mod-str)
+              0)
+        values (mapv roll-n (repeat total-dice sides))]
     {:sides sides
-     :values (mapv roll-n (repeat total-dice sides))}))
+     :dice dice-description
+     :values values
+     :total (apply + mod values)}))
 
 (defn render-rolls [author rolls]
   (letfn [(render [result]
-            (clojure.string/join "\n" [(str "d" (:sides result) ": " (:values result)
-                                            (if (< (count (:values result)) 2)
-                                              ""
-                                              (str "   total: " (apply + (:values result)))))
+            (clojure.string/join "\n" [(str (:dice result) ": " (:values result)
+                                            (str "   total: " (:total result)))
                                        (if-let [friend (and (= (:sides result) 100)
                                                             (some #(<= 90 %) (:values result))
                                                             (roll-insultable? (.getId author)))]
