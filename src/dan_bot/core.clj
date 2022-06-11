@@ -225,7 +225,7 @@
           display-rows (mapv (fn [r]
                                (let [n (:incident_types/name r)
                                      d (:incident_types/description r)]
-                                 (str n ": " d)))
+                                 (format "**%s**: %s" n d)))
                              incident-types)]
       (.. event
           (reply (clojure.string/join "\n" display-rows))
@@ -274,27 +274,6 @@
         (setEphemeral true)
         queue)))
 
-(defslash record-incident
-  "Record the date of the current incident"
-  {:type {:type OptionType/STRING
-          :description "The type of incident (use the same type name each time)"
-          :required true}}
-  [event]
-  (if (in-guilds? (:incident-guilds config) event)
-    (let [n (->> (.getOptions event)
-                 (filter #(= "type" (.getName %)))
-                 first
-                 (.getAsString))]
-      (jdbc/execute! ds [(str "insert into incidents (name) values ('" n "')")])
-      (.. event
-          (reply "Incident time set.")
-          (setEphemeral true)
-          queue))
-    (.. event
-        (reply "This slash command is not supported for your guild.")
-        (setEphemeral true)
-        queue)))
-
 (defn to-java-datetime [sql-datetime]
   (ZonedDateTime/parse sql-datetime
                        (.. (DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss")
@@ -309,6 +288,38 @@ select status_template, t
  limit 1
 "))
 
+(defn get-time-since-last-incident-report [incident-type]
+  (let [lookup-result (->> (jdbc/execute! ds [(latest-incident incident-type)])
+                           first)
+        last-incident (->> lookup-result
+                           :incidents/t
+                           to-java-datetime)
+        template (:incident_types/status_template lookup-result)
+        elapsed-days (.between ChronoUnit/DAYS last-incident (ZonedDateTime/now))]
+    (format template elapsed-days)))
+
+(defslash record-incident
+  "Record the date of the current incident"
+  {:type {:type OptionType/STRING
+          :description "The type of incident (use the same type name each time)"
+          :required true}}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [n (->> (.getOptions event)
+                 (filter #(= "type" (.getName %)))
+                 first
+                 (.getAsString))]
+      (jdbc/execute! ds [(str "insert into incidents (name) values ('" n "')")])
+      (.. event
+          (reply (clojure.string/join "\n"
+                                      [(get-time-since-last-incident-report n)
+                                       (format "New %s incident recorded." n)]))
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
 (defslash time-since-last-incident
   "Report the time elapsed since the last incident"
   {:type {:type OptionType/STRING
@@ -320,16 +331,9 @@ select status_template, t
                                  (filter #(= "type" (.getName %)))
                                  first
                                  (.getAsString))
-                            (:default-incident config))
-          lookup-result (->> (jdbc/execute! ds [(latest-incident incident-type)])
-                             first)
-          last-incident (->> lookup-result
-                             :incidents/t
-                             to-java-datetime)
-          template (:incident_types/status_template lookup-result)
-          elapsed-days (.between ChronoUnit/DAYS last-incident (ZonedDateTime/now))]
+                            (:default-incident config))]
       (.. event
-          (reply (format template elapsed-days))
+          (reply (get-time-since-last-incident-report incident-type))
           queue))
     (.. event
         (reply "This slash command is not supported for your guild.")
