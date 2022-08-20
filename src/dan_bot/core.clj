@@ -308,12 +308,57 @@ select status_template, t
     (let [n (->> (.getOptions event)
                  (filter #(= "type" (.getName %)))
                  first
-                 (.getAsString))]
+                 (.getAsString))
+          time-since-last (get-time-since-last-incident-report n)]
       (jdbc/execute! ds [(str "insert into incidents (name) values ('" n "')")])
       (.. event
           (reply (clojure.string/join "\n"
-                                      [(get-time-since-last-incident-report n)
+                                      [time-since-last
                                        (format "New %s incident recorded." n)]))
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
+(defslash incident-history
+  "List the last n incidents for a given type"
+  {:type {:type OptionType/STRING
+          :description "The type of incident (use the same type name each time)"
+          :required true}
+   :n {:type OptionType/INTEGER
+       :description "The maximum number of events to list"}}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [type (->> (.getOptions event)
+                    (filter #(= "type" (.getName %)))
+                    first
+                    (.getAsString))
+          n-opt (->> (.getOptions event)
+                     (filter #(= "n" (.getName %)))
+                     first)
+          n (if n-opt
+              (.getAsLong n-opt)
+              10)
+          history (->> (jdbc/execute! ds [(format "select t from incidents where name = '%s' order by t limit %d" type n)])
+                       (map :incidents/t))
+          days (->> history
+                    (map to-java-datetime)
+                    (map #(.truncatedTo % ChronoUnit/DAYS))
+                    distinct)
+          diffs (map #(.between ChronoUnit/DAYS %1 %2)
+                     days
+                     (rest days))
+          average-days (if (empty? diffs)
+                         ##Inf
+                         (float (/ (apply + diffs)
+                                   (count diffs))))]
+      (.. event
+          (reply (clojure.string/join "\n" (concat [(format "**%s** history:" type)
+                                                    ""]
+                                                   history
+                                                   [""
+                                                    (format "Average days between incidents: %.1f" average-days)])))
           queue))
     (.. event
         (reply "This slash command is not supported for your guild.")
