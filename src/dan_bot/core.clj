@@ -289,14 +289,14 @@ select status_template, t
 "))
 
 (defn get-time-since-last-incident-report [incident-type]
-  (let [lookup-result (->> (jdbc/execute! ds [(latest-incident incident-type)])
-                           first)
-        last-incident (->> lookup-result
-                           :incidents/t
-                           to-java-datetime)
-        template (:incident_types/status_template lookup-result)
-        elapsed-days (.between ChronoUnit/DAYS last-incident (ZonedDateTime/now))]
-    (format template elapsed-days)))
+  (when-let [lookup-result (->> (jdbc/execute! ds [(latest-incident incident-type)])
+                                first)]
+    (let [last-incident (->> lookup-result
+                             :incidents/t
+                             to-java-datetime)
+          template (:incident_types/status_template lookup-result)
+          elapsed-days (.between ChronoUnit/DAYS last-incident (ZonedDateTime/now))]
+      (format template elapsed-days))))
 
 (defslash record-incident
   "Record the date of the current incident"
@@ -313,7 +313,7 @@ select status_template, t
       (jdbc/execute! ds [(str "insert into incidents (name) values ('" n "')")])
       (.. event
           (reply (clojure.string/join "\n"
-                                      [time-since-last
+                                      [(or time-since-last "")
                                        (format "New %s incident recorded." n)]))
           queue))
     (.. event
