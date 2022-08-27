@@ -34,9 +34,6 @@
 (defn mention-friend [friend-id]
   (str "<@!" friend-id ">"))
 
-;(map #(.getName %) (.getMethods ListenerAdapter))
-;(map #(.getName %) (.getMethods SlashCommandEvent))
-
 (defn roll-n [sides]
   (let [r (rand-int sides)]
     (if (= sides 100)
@@ -142,6 +139,17 @@
                  (upsertCommand ~data-sym)
                  queue))))))
 
+(defn get-option-as [event option-key type-enum]
+  (let [option (name option-key)
+        type-map {OptionType/STRING #(.getAsString %)
+                  OptionType/INTEGER #(.getAsLong %)}
+        type (or (get type-map type-enum)
+                 (throw (Exception. "Unknown enum value")))]
+    (when-let [v (->> (.getOptions event)
+                      (filter #(= option (.getName %)))
+                      first)]
+      (type v))))
+
 (defslash test
   "test slash command for dan-bot"
   {}
@@ -157,10 +165,7 @@
           :description "The dice to roll, e.g. d6, 2d10"
           :required true}}
   [event]
-  (let [dice-str (.. event
-                     getOptions
-                     (get 0)
-                     getAsString)
+  (let [dice-str (get-option-as event :dice OptionType/STRING)
         results (mapv roll-dice
                       (clojure.string/split dice-str #" "))]
     (.. event
@@ -177,20 +182,15 @@
              :description "Semicolon separated list of choices"
              :required true}}
   [event]
-  (let [title (->> (.getOptions event)
-                   (filter #(= "title" (.getName %)))
-                   first)
-        choices-str (->> (.getOptions event)
-                         (filter #(= "choices" (.getName %)))
-                         first
-                         (.getAsString))
+  (let [title (get-option-as event :title OptionType/STRING)
+        choices-str (get-option-as event :choices OptionType/STRING)
         emojis ["1️⃣" "2️⃣" "3️⃣" "4️⃣" "5⃣" "6️⃣" "7️⃣" "8️⃣" "9️⃣" "🔟"]
         choices (clojure.string/split choices-str #";")
         display-choices (mapv (fn [emoji choice]
                                 (str emoji ": " choice))
                               emojis
                               choices)
-        text (clojure.string/join "\n" (flatten [(str "**" (.getAsString title) "**")
+        text (clojure.string/join "\n" (flatten [(str "**" title "**")
                                                  display-choices
                                                  "Vote by reacting to this message:"]))
         message (.. event
@@ -213,8 +213,6 @@
                      getGuild
                      getId)]
     (contains? guild-ids guild-id)))
-
-(def last-incident (atom nil))
 
 (defslash list-incident-types
   "List the currently defined incident types"
@@ -249,24 +247,44 @@
               :required true}}
   [event]
   (if (in-guilds? (:incident-guilds config) event)
-    (let [n (->> (.getOptions event)
-                 (filter #(= "type" (.getName %)))
-                 first
-                 (.getAsString))
-          d (->> (.getOptions event)
-                 (filter #(= "description" (.getName %)))
-                 first
-                 (.getAsString))
-          t (->> (.getOptions event)
-                 (filter #(= "template" (.getName %)))
-                 first
-                 (.getAsString))]
+    (let [n (get-option-as event :type OptionType/STRING)
+          d (get-option-as event :description OptionType/STRING)
+          t (get-option-as event :template OptionType/STRING)]
       (jdbc/execute! ds [(str "insert into incident_types (name, description, status_template) values ("
                               (->> (mapv #(str "'" % "'") [n d t])
                                    (clojure.string/join ", "))
                               ")")])
       (.. event
           (reply "New incident type stored.")
+          (setEphemeral true)
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
+(defslash update-incident-type
+  "Update an existing type of incident"
+  {:type {:type OptionType/STRING
+          :description "The name that identifies this type of incident"
+          :required true}
+   :description {:type OptionType/STRING
+                 :description "An explanation of what this incident type represents"}
+   :template {:type OptionType/STRING
+              :description "A printf style template for printing the most recent incident"}}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [n (get-option-as event :type OptionType/STRING)
+          d (get-option-as event :description OptionType/STRING)
+          t (get-option-as event :template OptionType/STRING)
+          updates (clojure.string/join ", " (->> [["description" d]
+                                                  ["status_template" t]]
+                                                 (filter (comp not nil? second))
+                                                 (map (fn [[col v]]
+                                                        (format "%s = '%s'" col v)))))]
+      (jdbc/execute! ds [(format "update incident_types set %s where name = '%s'" updates n)])
+      (.. event
+          (reply (format "Incident type %s updated." n))
           (setEphemeral true)
           queue))
     (.. event
@@ -305,10 +323,7 @@ select status_template, t
           :required true}}
   [event]
   (if (in-guilds? (:incident-guilds config) event)
-    (let [n (->> (.getOptions event)
-                 (filter #(= "type" (.getName %)))
-                 first
-                 (.getAsString))
+    (let [n (get-option-as event :type OptionType/STRING)
           time-since-last (get-time-since-last-incident-report n)]
       (jdbc/execute! ds [(str "insert into incidents (name) values ('" n "')")])
       (.. event
@@ -330,16 +345,9 @@ select status_template, t
        :description "The maximum number of events to list"}}
   [event]
   (if (in-guilds? (:incident-guilds config) event)
-    (let [type (->> (.getOptions event)
-                    (filter #(= "type" (.getName %)))
-                    first
-                    (.getAsString))
-          n-opt (->> (.getOptions event)
-                     (filter #(= "n" (.getName %)))
-                     first)
-          n (if n-opt
-              (.getAsLong n-opt)
-              10)
+    (let [type (get-option-as event :type OptionType/STRING)
+          n (or (get-option-as event :n OptionType/INTEGER)
+                10)
           history (->> (jdbc/execute! ds [(format "select t from incidents where name = '%s' order by t limit %d" type n)])
                        (map :incidents/t))
           days (->> history
@@ -372,10 +380,7 @@ select status_template, t
           :required false}}
   [event]
   (if (in-guilds? (:incident-guilds config) event)
-    (let [incident-type (or (->> (.getOptions event)
-                                 (filter #(= "type" (.getName %)))
-                                 first
-                                 (.getAsString))
+    (let [incident-type (or (get-option-as event :type OptionType/STRING)
                             (:default-incident config))]
       (.. event
           (reply (get-time-since-last-incident-report incident-type))
