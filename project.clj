@@ -7,7 +7,9 @@
   :dependencies [[org.clojure/clojure "1.10.3"]
                  [net.dv8tion/JDA "5.0.0-alpha.9"]
                  [com.github.seancorfield/next.jdbc "1.2.772"]
-                 [org.xerial/sqlite-jdbc "3.36.0"]]
+                 [org.xerial/sqlite-jdbc "3.36.0"]
+                 [edu.stanford.nlp/stanford-corenlp "4.4.0"]
+                 [edu.stanford.nlp/stanford-corenlp "4.4.0" :classifier "models"]]
   :main ^:skip-aot dan-bot.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all

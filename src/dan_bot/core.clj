@@ -8,7 +8,8 @@
            net.dv8tion.jda.api.interactions.commands.build.Commands
            net.dv8tion.jda.api.interactions.commands.OptionType
            net.dv8tion.jda.api.requests.GatewayIntent)
-  (:require [next.jdbc :as jdbc])
+  (:require [next.jdbc :as jdbc]
+            [dan-bot.nlp :as nlp])
   (:gen-class))
 
 (def db {:dbtype "sqlite" :dbname "bot"})
@@ -424,6 +425,16 @@ select status_template, t
     (when (and (re-find #"<a:ultrafastparrot:658317840868442113>" text)
                #_(= user-id friend-to-calm-id))
       (alert "Detected uncalmness:" text))))
+
+(defmessage sentiment-alert [event]
+  (let [message (.getMessage event)
+        text (.getContentRaw message)
+        sentiments (nlp/sentiment text)
+        msg (->> sentiments
+                 (map (fn [[sentiment sentence]]
+                        (str sentiment " | " sentence)))
+                 (clojure.string/join "\n"))]
+    (alert msg)))
 
 (defmacro def-random-response-listener [name regex responses]
   (let [event (gensym "event")
