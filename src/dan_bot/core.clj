@@ -7,7 +7,9 @@
            net.dv8tion.jda.api.hooks.ListenerAdapter
            net.dv8tion.jda.api.interactions.commands.build.Commands
            net.dv8tion.jda.api.interactions.commands.OptionType
-           net.dv8tion.jda.api.requests.GatewayIntent)
+           net.dv8tion.jda.api.requests.GatewayIntent
+           net.dv8tion.jda.api.entities.Activity
+           net.dv8tion.jda.api.entities.Activity$ActivityType)
   (:require [next.jdbc :as jdbc]
             [dan-bot.nlp :as nlp])
   (:gen-class))
@@ -41,6 +43,13 @@
       r
       (inc r))))
 
+(defn explode-n [roll]
+  (fn [n]
+    (let [result (roll n)]
+      (if (= result n)
+        (+ result (roll n))
+        result))))
+
 (defn roll-dice [dice-description]
   (let [[_ n-str sides-str mod-str] (re-matches #"([0-9]*)d([0-9]+)([+-][0-9]+)?" dice-description)
         total-dice (if (empty? n-str)
@@ -56,6 +65,28 @@
      :values values
      :total (apply + mod values)}))
 
+(defn roll-dice-shadowrun [dice-description]
+  (let [[_ n-str sides-str mod-str thresh-str] (re-matches #"([0-9]*)d([0-9]+)([+-][0-9]+)?(>[0-9]+)?" dice-description)
+        total-dice (if (empty? n-str)
+                     1
+                     (Integer/parseInt n-str))
+        sides (Integer/parseInt sides-str)
+        mod (if mod-str
+              (Integer/parseInt mod-str)
+              0)
+        thresh (if thresh-str
+                 (->> thresh-str rest (apply str) (Integer/parseInt))
+                 4)
+        values (->> (mapv (explode-n roll-n) (repeat total-dice sides))
+                    (mapv #(+ mod %)))]
+    {:sides sides
+     :dice dice-description
+     :thresh thresh
+     :values values
+     :successes (->> values
+                     (filter #(< thresh %))
+                     count)}))
+
 (defn render-rolls [author rolls]
   (letfn [(render [result]
             (clojure.string/join "\n" [(str (:dice result) ": " (:values result)
@@ -68,7 +99,7 @@
     (let [rolls-text (->> rolls
                           (map render)
                           (clojure.string/join "\n"))
-          grand-total (apply + (mapcat :values rolls))]
+          grand-total (apply + (map :total rolls))]
       (if (< (count rolls) 2)
         rolls-text
         (str rolls-text "\n"
@@ -78,16 +109,29 @@
   (let [data (Commands/slash command-name description)]
     (if-not (empty? options)
       (reduce (fn [d [opt-name values]]
-                (if-let [required (:required values)]
-                  (.addOption d (:type values) (name opt-name) (:description values) required)
-                  (.addOption d (:type values) (name opt-name) (:description values))))
+                (let [required (:required values)
+                      autocomplete (:autocomplete values)]
+                  (.addOption d
+                              (:type values)
+                              (name opt-name)
+                              (:description values)
+                              (or required false)
+                              (if autocomplete true false))))
               data
               options)
       data)))
 
 (def jda (.. (JDABuilder/createLight token [GatewayIntent/GUILD_MESSAGES
                                             GatewayIntent/DIRECT_MESSAGES])
+             (setActivity (Activity/listening "the sweet song of the orb"))
              build))
+
+#_(.addEventListener jda (object-array
+                        [(proxy [ListenerAdapter] []
+                           (onSlashCommandInteraction [event]
+                             (println
+                              "got slash command event:"
+                              (.getName event))))]))
 
 (def alert-channel (.. jda
                        (retrieveUserById (:me friend-ids))
@@ -120,25 +164,51 @@
      (onSlashCommandInteraction ~args
        ~@body)))
 
+(defn complete [text completions]
+  (->> completions
+       (filter #(.contains % text))
+       (sort-by #(clojure.string/index-of % text))))
+
+(defn completion-listener [command-name option-name query]
+  (proxy [ListenerAdapter] []
+    (onAutoCompleteInteraction [event]
+      (println "Running completion for " (.getName event) (.. event getFocusedOption getName))
+      (when (and (= command-name (.getName event))
+                 (= option-name (.. event
+                                    getFocusedOption
+                                    getName)))
+        (let [search-text (.. event
+                              getFocusedOption
+                              getValue)
+              completions (query)]
+          (complete search-text completions))))))
+
 (defmacro defslash [name description options args & body]
   (let [[event] args
         handler-name (symbol (str (str name) "-handler"))
         name-key (gensym name)
         data-sym (gensym "data")]
-    `(do (defn ~handler-name ~args ~@body)
-         (defonce ~name
-           (let [~name-key (slash-command-listener
-                            ~args
-                            (when (= ~(str name) (.getName ~event))
-                              (log-event ~event)
-                              (~handler-name ~event)))]
-             (.addEventListener jda (object-array [~name-key]))
-             ~name-key))
-         (when-not (global-command-defined? ~(str name))
-           (let [~data-sym (slash-command-data ~(str name) ~description ~options)]
-             (.. jda
-                 (upsertCommand ~data-sym)
-                 queue))))))
+    `(let [options# ~options]
+       (defn ~handler-name ~args ~@body)
+       (defonce ~name
+         (let [~name-key (slash-command-listener
+                          ~args
+                          (when (= ~(str name) (.getName ~event))
+                            (log-event ~event)
+                            (~handler-name ~event)))
+               completions# (->> options#
+                                 (filter (fn [[unused# settings#]]
+                                           (:autocomplete settings#)))
+                                 (map (fn [[n# settings#]]
+                                        (completion-listener ~(str name) n# (:autocomplete settings#)))))]
+           (.addEventListener jda (object-array (cons ~name-key
+                                                      completions#)))
+           ~name-key))
+       (when-not (global-command-defined? ~(str name))
+         (let [~data-sym (slash-command-data ~(str name) ~description options#)]
+           (.. jda
+               (upsertCommand ~data-sym)
+               queue))))))
 
 (defn get-option-as [event option-key type-enum]
   (let [option (name option-key)
@@ -337,6 +407,30 @@ select status_template, t
         (setEphemeral true)
         queue)))
 
+(defslash test-record-incident
+  "Test autocompletion"
+  {:type {:type OptionType/STRING
+          :description "The type of incident (use the same type name each time)"
+          :required true
+          :autocomplete (fn []
+                          (println "Fetching completion options")
+                          (->> (jdbc/execute! ds [(format "select distinct name from incident_types")])
+                               (map :incident_types/name)))}}
+  [event]
+  (if (in-guilds? (:incident-guilds config) event)
+    (let [n (get-option-as event :type OptionType/STRING)
+          time-since-last nil]
+      (.. event
+          (reply (clojure.string/join "\n"
+                                      [(or time-since-last "")
+                                       (format "New %s incident recorded." n)]))
+          (setEphemeral true)
+          queue))
+    (.. event
+        (reply "This slash command is not supported for your guild.")
+        (setEphemeral true)
+        queue)))
+
 (defslash incident-history
   "List the last n incidents for a given type"
   {:type {:type OptionType/STRING
@@ -429,12 +523,8 @@ select status_template, t
 (defmessage sentiment-alert [event]
   (let [message (.getMessage event)
         text (.getContentRaw message)
-        sentiments (nlp/sentiment text)
-        msg (->> sentiments
-                 (map (fn [[sentiment sentence]]
-                        (str sentiment " | " sentence)))
-                 (clojure.string/join "\n"))]
-    (alert msg)))
+        sentiments (nlp/sentiment text)]
+    (nlp/append-sentiment "./sentiments.log" sentiments)))
 
 (defmacro def-random-response-listener [name regex responses]
   (let [event (gensym "event")
@@ -514,5 +604,9 @@ create table incidents (
   primary key (name, t),
   foreign key (name) references incident_types (name)
     on delete cascade
-)"]))
+)"])
+
+  (.. jda
+      getPresence
+      (setActivity (Activity/listening "the sweet song of the orb"))))
 
